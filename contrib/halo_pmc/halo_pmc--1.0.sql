@@ -1,0 +1,6 @@
+CREATE FUNCTION halo_pmc_init()
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'halo_pmc_init'
+LANGUAGE C VOLATILE;
+
+REVOKE ALL ON FUNCTION halo_pmc_init() FROM PUBLIC;

@@ -16,6 +16,7 @@
  *--------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "utils/halo_pmc.h"
 
 #include <ctype.h>
 #include <float.h>
@@ -1016,6 +1017,15 @@ static struct config_bool ConfigureNamesBool[] =
 		true,
 		NULL, NULL, NULL
 	},
+	{
+    {"halo_pmc_fast", PGC_USERSET, DEVELOPER_OPTIONS,
+        gettext_noop("Enables RDPMC fast performance counter reading."),
+        NULL
+    },
+    &halo_pmc_fast,
+    true,
+    NULL, NULL, NULL
+},
 	{
 		{"enable_indexonlyscan", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables the planner's use of index-only-scan plans."),
@@ -3947,6 +3957,15 @@ static struct config_real ConfigureNamesReal[] =
 
 static struct config_string ConfigureNamesString[] =
 {
+            {
+        {"halo_pmc_list", PGC_SUSET, CUSTOM_OPTIONS,
+            gettext_noop("Specifies CPU performance counters to monitor."),
+            NULL
+        },
+        &halo_pmc_list,
+        "",
+        NULL, NULL, NULL
+    },
 	{
 		{"archive_command", PGC_SIGHUP, WAL_ARCHIVING,
 			gettext_noop("Sets the shell command that will be called to archive a WAL file."),

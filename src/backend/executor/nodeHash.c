@@ -40,6 +40,7 @@
 #include "port/pg_bitutils.h"
 #include "utils/dynahash.h"
 #include "utils/guc.h"
+#include "utils/halo_pmc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -144,6 +145,19 @@ MultiExecPrivateHash(HashState *node)
 	TupleTableSlot *slot;
 	ExprContext *econtext;
 	uint32		hashvalue;
+	static bool pmc_active = false;
+    bool pmc_enabled = false;
+    bool pmc_opened = false;
+	uint64 pmc_before[PMC_NUM] = {0};
+uint64 pmc_after[PMC_NUM] = {0};
+uint64 pmc_total[PMC_NUM] = {0};
+uint64 pmc_valid[PMC_NUM] = {0};
+uint64 pmc_failed[PMC_NUM] = {0};
+bool pmc_before_ok[PMC_NUM] = {false};
+
+bool hash_ok;
+int pmc_num = 0;
+int i;
 
 	/*
 	 * get state info from node
@@ -157,20 +171,72 @@ MultiExecPrivateHash(HashState *node)
 	hashkeys = node->hashkeys;
 	econtext = node->ps.ps_ExprContext;
 
-	/*
-	 * Get all tuples from the node below the Hash node and insert into the
-	 * hash table (or temp files).
-	 */
+	/* Prevent nested Hash nodes from overwriting PMC resources */
+if (!pmc_active &&
+    halo_pmc_list != NULL &&
+    halo_pmc_list[0] != '\0')
+{
+    pmc_enabled = true;
+    pmc_active = true;
+}
+
+	PG_TRY();
+	{
+
+		if (pmc_enabled)
+{
+    pmc_num = PmcOpen();
+    pmc_opened = (pmc_num > 0);
+}
+
 	for (;;)
 	{
 		slot = ExecProcNode(outerNode);
 		if (TupIsNull(slot))
 			break;
 		/* We have to compute the hash value */
-		econtext->ecxt_outertuple = slot;
-		if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
-								 false, hashtable->keepNulls,
-								 &hashvalue))
+econtext->ecxt_outertuple = slot;
+
+/* PMC: read counters before hash computation */
+if (pmc_opened)
+{
+    for (i = 0; i < pmc_num; i++)
+    {
+        pmc_before_ok[i] =
+            PmcReadCounter(i, &pmc_before[i]);
+    }
+}
+
+/* Original hash computation */
+hash_ok = ExecHashGetHashValue(hashtable,
+                              econtext,
+                              hashkeys,
+                              false,
+                              hashtable->keepNulls,
+                              &hashvalue);
+
+/* PMC: read counters after hash computation */
+if (pmc_opened)
+{
+    for (i = 0; i < pmc_num; i++)
+    {
+        if (PmcReadCounter(i, &pmc_after[i]) &&
+            pmc_before_ok[i] &&
+            pmc_after[i] >= pmc_before[i])
+        {
+            pmc_total[i] +=
+                pmc_after[i] - pmc_before[i];
+
+            pmc_valid[i]++;
+        }
+        else
+        {
+            pmc_failed[i]++;
+        }
+    }
+}
+
+if (hash_ok)
 		{
 			int			bucketNumber;
 
@@ -201,6 +267,40 @@ MultiExecPrivateHash(HashState *node)
 		hashtable->spacePeak = hashtable->spaceUsed;
 
 	hashtable->partialTuples = hashtable->totalTuples;
+
+		if (pmc_opened)
+{
+    PmcReadData(0);
+    PmcPrint();
+
+    elog(INFO, "===== %s Hash Computation =====",
+     halo_pmc_fast ? "RDPMC" : "READ");
+
+    for (i = 0; i < pmc_num; i++)
+    {
+        elog(INFO,
+             "%s: total=%llu, valid=%llu, failed=%llu, average=%.2f",
+             _PmcData[i].name,
+             (unsigned long long) pmc_total[i],
+             (unsigned long long) pmc_valid[i],
+             (unsigned long long) pmc_failed[i],
+             pmc_valid[i] > 0 ?
+             (double) pmc_total[i] / pmc_valid[i] : 0.0);
+    }
+}if (pmc_enabled)
+            pmc_active = false;
+	}
+	PG_CATCH();
+{
+    if (pmc_enabled)
+    {
+        PmcClose(_PmcData);
+        pmc_active = false;
+    }
+
+    PG_RE_THROW();
+}
+PG_END_TRY();
 }
 
 /* ----------------------------------------------------------------
